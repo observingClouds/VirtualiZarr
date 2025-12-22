@@ -17,7 +17,7 @@ V = TypeVar("V")
 async def _concurrent_map(
     items: Iterable[T],
     func: Callable[..., Awaitable[V]],
-    limit: int | None = 200,
+    limit: int | None = 50,
 ) -> list[V]:
     if limit is None:
         return await asyncio.gather(*list(starmap(func, items)))
