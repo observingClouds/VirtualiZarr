@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, TypeAlias, cast
 import numpy as np
 
 from virtualizarr.manifests.array_api import expand_dims
+from virtualizarr.manifests.manifest import ChunkManifest
+from virtualizarr.manifests.utils import copy_and_replace_metadata
 
 # indexer with only basic selectors, no new axes or ellipsis
 T_BasicIndexer_1d: TypeAlias = int | slice | np.ndarray
@@ -143,51 +145,154 @@ def apply_selection(
     # at this point there should be no ellipsis, no Nones, and one 1D indexer for each axis.
     assert len(indexer_without_newaxes) == marr.ndim
 
-    output_arr = marr
-    for axis, (length, indexer_1d) in enumerate(
-        zip(marr.shape, indexer_without_newaxes)
+    # Track dimensions that will be dropped by integer indexing
+    axes_to_drop = []
+    new_shape = list(marr.shape)
+    new_chunk_shape = list(marr.chunks)
+    chunk_indexers = []
+
+    # Process each dimension
+    for axis, (length, chunk_size, indexer_1d) in enumerate(
+        zip(marr.shape, marr.chunks, indexer_without_newaxes)
     ):
-        output_arr = apply_selection_1d(output_arr, indexer_1d, length)
-
-    return output_arr
-
-
-def apply_selection_1d(
-    marr: "ManifestArray", indexer_1d: T_BasicIndexer_1d, length: int
-) -> "ManifestArray":
-    """
-    Actually index the ManifestArray along 1 dimension.
-
-    Notice that none of these options actually do any indexing right now!
-    """
-
-    if isinstance(indexer_1d, slice):
-        if slice_is_no_op(indexer_1d, axis_length=length):
-            pass
-        else:
-            NotImplementedError(
-                f"Unsupported indexer. Indexing within a ManifestArray using ints or slices is not yet supported (see GitHub issue #51), but received {indexer_1d}"
-            )
-    elif isinstance(indexer_1d, int):
-        # TODO cover possibility of indexing into a length-1 dimension (which just removes that dimension)?
-        raise NotImplementedError(
-            f"Unsupported indexer. Indexing within a ManifestArray using ints or slices is not yet supported (see GitHub issue #51), but received {indexer_1d}"
+        chunk_indexer, new_dim_size, drop_axis = process_indexer_for_axis(
+            indexer_1d, length, chunk_size, axis
         )
+        chunk_indexers.append(chunk_indexer)
+        
+        if drop_axis:
+            axes_to_drop.append(axis)
+        else:
+            new_shape[axis] = new_dim_size
+
+    # Apply chunk indexing to the manifest
+    indexed_paths = marr.manifest._paths[tuple(chunk_indexers)]
+    indexed_offsets = marr.manifest._offsets[tuple(chunk_indexers)]
+    indexed_lengths = marr.manifest._lengths[tuple(chunk_indexers)]
+    
+    # Create new manifest with indexed chunks
+    new_manifest = ChunkManifest.from_arrays(
+        paths=indexed_paths,
+        offsets=indexed_offsets,
+        lengths=indexed_lengths,
+        validate_paths=False,
+    )
+
+    # Remove dropped dimensions from shape and chunk_shape
+    for axis_offset, axis in enumerate(axes_to_drop):
+        adjusted_axis = axis - axis_offset
+        new_shape.pop(adjusted_axis)
+        new_chunk_shape.pop(adjusted_axis)
+
+    # Update metadata with new shape (handle scalar arrays correctly)
+    new_metadata = copy_and_replace_metadata(
+        marr.metadata,
+        new_shape=new_shape,
+        new_chunks=new_chunk_shape,
+    )
+
+    # Import here to avoid circular dependency
+    from virtualizarr.manifests.array import ManifestArray
+
+    return ManifestArray(chunkmanifest=new_manifest, metadata=new_metadata)
+
+
+def process_indexer_for_axis(
+    indexer_1d: T_BasicIndexer_1d, length: int, chunk_size: int, axis: int
+) -> tuple[int | slice, int, bool]:
+    """
+    Process a single-axis indexer and convert it to chunk-grid indexing.
+
+    Parameters
+    ----------
+    indexer_1d : int | slice | np.ndarray
+        The indexer for this axis
+    length : int
+        The length of this axis
+    chunk_size : int
+        The chunk size along this axis
+    axis : int
+        The axis number (for error messages)
+
+    Returns
+    -------
+    tuple[int | slice, int, bool]
+        - chunk_indexer: The indexer to apply to the chunk grid
+        - new_length: The new length of this dimension
+        - drop_axis: Whether this dimension should be dropped (integer indexing)
+    """
+    if isinstance(indexer_1d, slice):
+        # Normalize the slice
+        start, stop, step = indexer_1d.indices(length)
+        
+        # Check if it's a no-op
+        if start == 0 and stop == length and step == 1:
+            return slice(None), length, False
+        
+        # Check if slice is chunk-aligned
+        if start % chunk_size != 0:
+            raise ValueError(
+                f"Slice start {start} is not aligned with chunk size {chunk_size} on axis {axis}. "
+                "Only chunk-aligned slicing is supported."
+            )
+        if stop % chunk_size != 0 and stop != length:
+            raise ValueError(
+                f"Slice stop {stop} is not aligned with chunk size {chunk_size} on axis {axis}. "
+                "Only chunk-aligned slicing is supported."
+            )
+        if step != 1:
+            if step % 1 != 0:
+                raise ValueError(
+                    f"Slice step {step} must be an integer."
+                )
+            # For now, only support step=1 for chunk-aligned slicing
+            # Could support other steps if they're multiples of chunk_size
+            raise NotImplementedError(
+                f"Slice step {step} is not supported. Only step=1 is currently supported for chunk-aligned slicing."
+            )
+        
+        # Convert array indices to chunk indices
+        chunk_start = start // chunk_size
+        chunk_stop = (stop + chunk_size - 1) // chunk_size  # Round up
+        
+        # Create chunk indexer
+        chunk_indexer = slice(chunk_start, chunk_stop, 1)
+        new_length = stop - start
+        
+        return chunk_indexer, new_length, False
+        
+    elif isinstance(indexer_1d, int):
+        # Handle negative indexing
+        if indexer_1d < 0:
+            indexer_1d = length + indexer_1d
+        
+        # Check bounds
+        if indexer_1d < 0 or indexer_1d >= length:
+            raise IndexError(
+                f"Index {indexer_1d} is out of bounds for axis {axis} with size {length}"
+            )
+        
+        # Check if integer index is chunk-aligned (selects start of a chunk)
+        if indexer_1d % chunk_size != 0:
+            raise ValueError(
+                f"Index {indexer_1d} is not aligned with chunk size {chunk_size} on axis {axis}. "
+                "Only chunk-aligned indexing is supported."
+            )
+        
+        # Convert array index to chunk index
+        chunk_index = indexer_1d // chunk_size
+        
+        # For chunk-aligned indexing, integer indexing selects a whole chunk, so dimension is NOT dropped
+        # Instead, we select a slice of one chunk
+        chunk_indexer = slice(chunk_index, chunk_index + 1, 1)
+        
+        return chunk_indexer, chunk_size, False
+        
     elif isinstance(indexer_1d, np.ndarray):
         raise NotImplementedError(
-            f"Unsupported indexer. So-called 'fancy indexing' via numpy arrays is not supported, but received {indexer_1d}"
+            f"Unsupported indexer. So-called 'fancy indexing' via numpy arrays is not supported."
         )
     else:
-        # should never get here
-        raise TypeError(f"Invalid indexer type: {indexer_1d}")
-
-    return marr
+        raise TypeError(f"Invalid indexer type: {type(indexer_1d)}")
 
 
-def slice_is_no_op(slice_indexer_1d: slice, axis_length: int) -> bool:
-    if slice_indexer_1d == slice(None):
-        return True
-    elif slice_indexer_1d == slice(0, axis_length, 1):
-        return True
-    else:
-        return False
