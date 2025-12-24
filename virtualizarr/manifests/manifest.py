@@ -424,6 +424,38 @@ class ChunkManifest:
         lengths_equal = (self._lengths == other._lengths).all()
         return paths_equal and offsets_equal and lengths_equal
 
+    def slice_chunk_grid(self, indexer: tuple[slice, ...]) -> "ChunkManifest":
+        """
+        Slice the chunk grid along chunk boundaries.
+        
+        Parameters
+        ----------
+        indexer
+            Tuple of slices, one for each dimension of the chunk grid.
+            Each slice represents chunk indices (not array indices).
+            
+        Returns
+        -------
+        manifest
+            New ChunkManifest with sliced chunk grid.
+        """
+        if len(indexer) != self.ndim_chunk_grid:
+            raise ValueError(
+                f"Number of slice dimensions ({len(indexer)}) must match chunk grid dimensions ({self.ndim_chunk_grid})"
+            )
+        
+        # Apply the indexer to all three internal arrays
+        sliced_paths = self._paths[indexer]
+        sliced_offsets = self._offsets[indexer]
+        sliced_lengths = self._lengths[indexer]
+        
+        return self.from_arrays(
+            paths=sliced_paths,
+            offsets=sliced_offsets,
+            lengths=sliced_lengths,
+            validate_paths=False,  # paths are already validated
+        )
+
     def rename_paths(
         self,
         new: str | Callable[[str], str],

@@ -147,31 +147,76 @@ def apply_selection(
     for axis, (length, indexer_1d) in enumerate(
         zip(marr.shape, indexer_without_newaxes)
     ):
-        output_arr = apply_selection_1d(output_arr, indexer_1d, length)
+        output_arr = apply_selection_1d(output_arr, indexer_1d, axis, length)
 
     return output_arr
 
 
 def apply_selection_1d(
-    marr: "ManifestArray", indexer_1d: T_BasicIndexer_1d, length: int
+    marr: "ManifestArray", indexer_1d: T_BasicIndexer_1d, axis: int, length: int
 ) -> "ManifestArray":
     """
     Actually index the ManifestArray along 1 dimension.
 
-    Notice that none of these options actually do any indexing right now!
+    Supports slicing along chunk boundaries.
     """
+    from virtualizarr.manifests.array import ManifestArray
+    from virtualizarr.manifests.utils import copy_and_replace_metadata
 
     if isinstance(indexer_1d, slice):
         if slice_is_no_op(indexer_1d, axis_length=length):
-            pass
-        else:
-            NotImplementedError(
-                f"Unsupported indexer. Indexing within a ManifestArray using ints or slices is not yet supported (see GitHub issue #51), but received {indexer_1d}"
+            return marr
+        
+        # Convert array slice to chunk slice
+        chunk_size = marr.chunks[axis]
+        
+        # Check if slice aligns with chunk boundaries
+        start, stop, step = indexer_1d.indices(length)
+        
+        if step != 1:
+            raise NotImplementedError(
+                f"Slicing with step != 1 is not supported, but got slice with step={step}"
             )
+        
+        # Calculate which chunks are involved
+        start_chunk = start // chunk_size
+        stop_chunk = (stop + chunk_size - 1) // chunk_size  # ceiling division
+        
+        # Check if slice aligns with chunk boundaries
+        if start % chunk_size != 0:
+            raise NotImplementedError(
+                f"Slicing must align with chunk boundaries. "
+                f"Slice start {start} does not align with chunk size {chunk_size} along axis {axis}"
+            )
+        if stop % chunk_size != 0 and stop != length:
+            raise NotImplementedError(
+                f"Slicing must align with chunk boundaries. "
+                f"Slice stop {stop} does not align with chunk size {chunk_size} along axis {axis} "
+                f"(array length={length})"
+            )
+        
+        # Build the indexer for the chunk grid
+        chunk_indexer = [slice(None)] * marr.ndim
+        chunk_indexer[axis] = slice(start_chunk, stop_chunk)
+        
+        # Slice the manifest
+        new_manifest = marr.manifest.slice_chunk_grid(tuple(chunk_indexer))
+        
+        # Update the metadata to reflect the new shape
+        new_shape = list(marr.shape)
+        new_shape[axis] = stop - start
+        
+        new_metadata = copy_and_replace_metadata(
+            marr.metadata,
+            new_shape=tuple(new_shape)
+        )
+        
+        return ManifestArray(metadata=new_metadata, chunkmanifest=new_manifest)
+        
     elif isinstance(indexer_1d, int):
         # TODO cover possibility of indexing into a length-1 dimension (which just removes that dimension)?
         raise NotImplementedError(
-            f"Unsupported indexer. Indexing within a ManifestArray using ints or slices is not yet supported (see GitHub issue #51), but received {indexer_1d}"
+            f"Unsupported indexer. Indexing within a ManifestArray using ints is not yet supported (see GitHub issue #51), but received {indexer_1d}"
         )
     elif isinstance(indexer_1d, np.ndarray):
         raise NotImplementedError(
@@ -180,8 +225,6 @@ def apply_selection_1d(
     else:
         # should never get here
         raise TypeError(f"Invalid indexer type: {indexer_1d}")
-
-    return marr
 
 
 def slice_is_no_op(slice_indexer_1d: slice, axis_length: int) -> bool:
