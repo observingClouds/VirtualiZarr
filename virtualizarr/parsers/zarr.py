@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from pathlib import Path
@@ -512,12 +513,32 @@ class ZarrParser:
         path = validate_and_normalize_path_to_uri(url, fs_root=Path.cwd().as_uri())
         object_store, _ = registry.resolve(path)
         zarr_store = ObjectStore(store=object_store)
-        manifest_group = asyncio.run(
-            _construct_manifest_group(
-                store=zarr_store,
-                path=url,
-                group=self.group,
-                skip_variables=self.skip_variables,
+        
+        # Handle both cases: running event loop (Jupyter) and no event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # If we're in a running loop (like Jupyter), run in a thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                manifest_group = executor.submit(
+                    lambda: asyncio.run(
+                        _construct_manifest_group(
+                            store=zarr_store,
+                            path=url,
+                            group=self.group,
+                            skip_variables=self.skip_variables,
+                        )
+                    )
+                ).result()
+        except RuntimeError:
+            # No running loop, safe to use asyncio.run() directly
+            manifest_group = asyncio.run(
+                _construct_manifest_group(
+                    store=zarr_store,
+                    path=url,
+                    group=self.group,
+                    skip_variables=self.skip_variables,
+                )
             )
-        )
+        
         return ManifestStore(registry=registry, group=manifest_group)
