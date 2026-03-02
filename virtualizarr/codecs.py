@@ -35,15 +35,60 @@ def zarr_codec_config_to_v3(num_codec: dict) -> dict:
 
 def zarr_codec_config_to_v2(num_codec: dict) -> dict:
     """
-    Convert a numcodecs codec into a zarr v2 configurable.
+    Convert a Zarr/V3-style codec configuration into the equivalent
+    representation used in Zarr v2 metadata.
+
+    The v2 ``filters`` field expects a list of dictionaries containing an
+    ``id`` key; numcodecs' registry also uses the ``id`` terminology.
+    Historically we attempted to special-case Blosc by returning a
+    v3-style ``{{"name": "blosc", "configuration": ...}}`` object when the
+    incoming configuration already contained an ``id``.  That was a mistake –
+    ``parse_filters`` will pass the resulting dict directly to
+    ``numcodecs.get_codec`` which only looks at ``id``.  If ``id`` is
+    missing the codec id becomes ``None`` and the user sees
+    ``UnknownCodecError('None')``.  The regression was triggered when a
+    ``ManifestArray`` was built from data with a *numcodecs* Blosc instance
+    (e.g. from an HDF5 parser); in that case ``get_codec_config`` returns
+    ``{"id": "blosc", ...}`` and the previous branch produced a broken
+    dictionary.
+
+    The new implementation treats **all** configs with an ``id`` key as
+    numcodecs-style and simply preserves that ``id`` in the returned dict.
+    This ensures the output always contains a non-``None`` ``id`` value.
+
+    Parameters
+    ----------
+    num_codec
+        A codec configuration dictionary produced by ``get_codec_config`` or
+        by a user.  May be in either v2 or v3 form.
+
+    Returns
+    -------
+    dict
+        A dictionary suitable for inclusion in a Zarr v2 metadata
+        ``filters`` list.
     """
-    # TODO: Special case Blosc codec
+    # If the incoming config was already produced by numcodecs (it has an
+    # ``id`` field), just retain the id and lift the remaining keys out of the
+    # nested ``configuration`` sub-dictionary.  This covers both
+    # ``{"id": "blosc", ...}`` and the equivalent
+    # ``{"id": "numcodecs.blosc", ...}`` cases.
+    if "id" in num_codec:
+        cfg = num_codec.copy()
+        codec_id = cfg.pop("id")
+        # some callers (in tests) provide a full v3 dictionary with a
+        # 'configuration' sub-dict; flatten it in the usual way
+        if "configuration" in cfg:
+            cfg = {**cfg["configuration"], **{k: v for k, v in cfg.items() if k != "configuration"}}
+        return {"id": codec_id, **cfg}
+
+    # Otherwise we expect a v3-style dict with a ``name`` key
     if name := num_codec.get("name", None):
-        return {"id": name, **num_codec["configuration"]}
-    elif num_codec.get("id", None):
-        return num_codec
-    else:
-        raise ValueError(f"Expected a valid Zarr V2 or V3 codec dict, got {num_codec}")
+        # ``configuration`` may or may not be present depending on how the
+        # dict was constructed; default to empty for safety.
+        return {"id": name, **num_codec.get("configuration", {})}
+
+    raise ValueError(f"Expected a valid Zarr V2 or V3 codec dict, got {num_codec}")
 
 
 def extract_codecs(

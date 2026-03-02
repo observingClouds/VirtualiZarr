@@ -166,13 +166,84 @@ def check_compatible_encodings(encoding1, encoding2):
                 )
 
 
+def _normalize_codec(codec: Any) -> dict[str, Any]:
+    """Return a canonical dict representation of *codec*.
+
+    The pipeline comparison used by ``ManifestArray`` previously relied on
+    object equality, which meant that two semantically equivalent blosc
+    codecs would compare as different if one was a ``numcodecs`` instance and
+    the other was the Zarr-built ``BloscCodec`` wrapper.  This helper uses
+    ``virtualizarr.codecs.get_codec_config`` to extract the configuration and
+    then strips any ``numcodecs.`` prefix.  The resulting dictionaries are
+    comparable by value and are guaranteed to be identical for codecs that
+    behave the same even if they come from different registrations.
+    """
+
+    from virtualizarr.codecs import get_codec_config, zarr_codec_config_to_v3
+
+    cfg = get_codec_config(codec)
+    # ensure we have a v3-style dict with ``name``/``configuration``
+    if "id" in cfg:
+        cfg = zarr_codec_config_to_v3(cfg)
+    # strip ``numcodecs.`` prefix so that ``blosc`` and
+    # ``numcodecs.blosc`` compare equal
+    name = cfg.get("name")
+    if isinstance(name, str) and name.startswith("numcodecs."):
+        cfg = {"name": name.split(".", 1)[1], "configuration": cfg.get("configuration", {})}
+
+    # The Blosc codec has a ``typesize`` attribute that is automatically
+    # filled by zarr based on the array dtype; numcodecs codecs frequently
+    # omit the key entirely.  In practice the value has no semantic effect
+    # on the data, and the presence/absence of a default value was causing
+    # otherwise identical pipelines to be treated as different.  Drop the
+    # key entirely for normalization so that ``Blosc`` codecs are compared
+    # only on the meaningful portion of their configuration.
+    if cfg.get("name") == "blosc":
+        conf = cfg.get("configuration", {})
+        # remove any “typesize” entry regardless of its value – the
+        # dtype check upstream already guarantees that arrays have a
+        # matching element size, so this field never needs to influence
+        # equality.
+        conf.pop("typesize", None)
+
+    # Convert any enum.Enum values (e.g. BloscCodec attributes) into
+    # their underlying values so that the canonical representation
+    # is JSON-serializable and consistent regardless of whether the
+    # codec originated from ``numcodecs`` or the zarr registry.
+    def _simplify(obj: Any) -> Any:
+        from enum import Enum
+
+        if isinstance(obj, Enum):
+            return obj.value
+        elif isinstance(obj, dict):
+            return {k: _simplify(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(_simplify(v) for v in obj)
+        else:
+            return obj
+
+    return _simplify(cfg)
+
+
+def _canonical_pipeline(pipeline: Any) -> tuple[dict[str, Any], ...]:
+    """Convert a codec pipeline (usually a tuple) into a tuple of normalized dicts."""
+
+    return tuple(_normalize_codec(c) for c in pipeline)
+
+
 def check_same_codecs(codecs: list[Any]) -> None:
-    first_codec, *other_codecs = codecs
-    for codec in other_codecs:
-        if codec != first_codec:
+    # ``codecs`` is a list of codec pipelines, e.g. the result of
+    # ``[get_codecs(arr) for arr in arrays]``.  Compare pipelines by their
+    # canonical dicts rather than relying on object identity.
+    first, *others = codecs
+    first_canonical = _canonical_pipeline(first)
+    for idx, other in enumerate(others, start=1):
+        other_canonical = _canonical_pipeline(other)
+        if other_canonical != first_canonical:
             raise NotImplementedError(
                 "The ManifestArray class cannot concatenate arrays which were stored using different codecs, "
-                f"But found codecs {first_codec} vs {codec} ."
+                f"But found codecs {first} vs {other}. "
+                f"(canonical: {first_canonical} vs {other_canonical}) "
                 "See https://github.com/zarr-developers/zarr-specs/issues/288"
             )
 

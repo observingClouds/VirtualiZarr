@@ -394,6 +394,71 @@ def test_refuse_combine(array_v3_metadata):
         with pytest.raises(NotImplementedError, match="different codecs"):
             func([marr1, marr2], axis=0)
 
+def test_concat_equivalent_codec_representations(array_v3_metadata):
+    """Arrays whose codecs only differ by the ``numcodecs.`` prefix should
+    concatenate successfully.
+
+    This exercise captures the regression reported in issue
+    #514: a ``numcodecs`` instance and the corresponding ``zarr`` codec were
+    treated as distinct by ``check_same_codecs``.  After the fix the
+    resulting array uses the first pipeline unchanged.
+    """
+
+    shape = (5, 1, 10)
+    chunks = (5, 1, 10)
+
+    # identical configuration, two different registry names
+    blosc_cfg = {
+        "cname": "zstd",
+        "clevel": 1,
+        "shuffle": "bitshuffle",
+        "blocksize": 0,
+    }
+    codec_no_prefix = {"name": "blosc", "configuration": blosc_cfg}
+    codec_with_prefix = {"name": "numcodecs.blosc", "configuration": blosc_cfg}
+
+    meta1 = array_v3_metadata(shape=shape, chunks=chunks, codecs=[codec_no_prefix])
+    meta2 = array_v3_metadata(shape=shape, chunks=chunks, codecs=[codec_with_prefix])
+
+    marr1 = ManifestArray(metadata=meta1, chunkmanifest=ChunkManifest(entries={"0.0.0": {"path": "/foo.nc", "offset": 0, "length": 0}}))
+    marr2 = ManifestArray(metadata=meta2, chunkmanifest=ChunkManifest(entries={"0.0.0": {"path": "/foo.nc", "offset": 0, "length": 0}}))
+
+    # should not raise, and resulting metadata should match the first input
+    result = np.concatenate([marr1, marr2], axis=0)
+    assert result.metadata.codecs == marr1.metadata.codecs
+
+    # also exercise the canonical pipeline helper directly with codec
+    # *objects* rather than dictionaries.  This mirrors the behaviour that
+    # caused the user error: one array had a ``numcodecs.Blosc`` instance and
+    # the other the zarr ``BloscCodec`` wrapper with enum attributes.
+    from zarr.codecs import BytesCodec, BloscCodec
+    import numcodecs
+    from virtualizarr.manifests.utils import _canonical_pipeline, check_same_codecs
+
+    num_pipeline = (
+        BytesCodec(),
+        numcodecs.Blosc(cname="zstd", clevel=1, shuffle="bitshuffle", blocksize=0),
+    )
+    zarr_pipeline = (
+        BytesCodec(),
+        BloscCodec(typesize=8, cname="zstd", clevel=1, shuffle="bitshuffle", blocksize=0),
+    )
+
+    # both forms should canonicalise to the same tuple and the check helper
+    # should happily accept them as equivalent.
+    can_num = _canonical_pipeline(num_pipeline)
+    can_zarr = _canonical_pipeline(zarr_pipeline)
+    assert can_num == can_zarr
+    check_same_codecs([num_pipeline, zarr_pipeline])
+
+    # the canonical representation ought to drop the ``typesize`` key so that
+    # two logically-equivalent pipelines look identical even when one codec
+    # explicitly included the value.
+    for can in (can_num, can_zarr):
+        _, blosc_dict = can
+        assert "typesize" not in blosc_dict.get("configuration", {}),
+    
+
     metadata_wrong_dtype = array_v3_metadata(
         shape=shape, chunks=chunks, data_type=np.dtype("int64")
     )

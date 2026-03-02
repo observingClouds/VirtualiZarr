@@ -244,6 +244,51 @@ def test_convert_v3_to_v2_metadata(
     assert v2_metadata.attributes == {}
 
 
+def test_convert_v3_to_v2_with_numcodecs_instance():
+    """Regression: metadata containing *numcodecs* codec objects.
+
+    Historically we returned a dictionary with a ``name`` key instead of
+    ``id`` for numcodecs codecs, which caused ``parse_filters`` to pass a
+    dict lacking ``id`` to numcodecs resulting in
+    ``UnknownCodecError('None')``.  Verify the converter handles the
+    situation gracefully and produces a usable v2 metadata object.
+    """
+    import numcodecs
+    from zarr.codecs import BytesCodec
+    from zarr.core.metadata.v3 import ArrayV3Metadata
+    from zarr.dtype import parse_data_type
+
+    shape = (3, 4)
+    chunks = (3, 4)
+    dtype = np.dtype('i8')
+
+    # build a metadata object directly so we can inject a numcodecs
+    # instance into the codec tuple.
+    pipeline = (
+        BytesCodec(),
+        numcodecs.Blosc(cname='zstd', clevel=2, shuffle=1),
+    )
+    v3_metadata = ArrayV3Metadata(
+        shape=shape,
+        data_type=parse_data_type(dtype, zarr_format=3),
+        chunk_grid={"name": "regular", "configuration": {"chunk_shape": chunks}},
+        chunk_key_encoding={"name": "default"},
+        fill_value=0,
+        codecs=pipeline,
+        attributes={},
+        dimension_names=None,
+        storage_transformers=None,
+    )
+
+    # conversion should succeed without raising and the resulting object
+    # should contain a blosc compressor with the expected id.
+    v2_metadata = convert_v3_to_v2_metadata(v3_metadata)
+    assert isinstance(v2_metadata, ArrayV2Metadata)
+    assert v2_metadata.filters is not None
+    *_, compressor = v2_metadata.filters
+    assert compressor.get_config()["id"] == "blosc"
+
+
 def test_warn_if_no_virtual_vars():
     non_virtual_ds = xr.Dataset({"foo": ("x", [10, 20, 30]), "x": ("x", [1, 2, 3])})
     with pytest.warns(UserWarning, match="non-virtual"):

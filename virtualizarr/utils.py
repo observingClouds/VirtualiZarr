@@ -134,12 +134,35 @@ def convert_v3_to_v2_metadata(
         The metadata object in v2 format.
     """
 
-    # TODO: Check that all ArrayBytesCodecs should in fact be excluded for V2 metadata storage.
-    v2_codecs = [
-        zarr_codec_config_to_v2(get_codec_config(codec))
-        for codec in v3_metadata.codecs
-        if not isinstance(codec, ArrayBytesCodec)
-    ]
+    # Construct the equivalent v2 ``filters`` list.  We deliberately
+    # ignore ``ArrayBytesCodec`` instances because v2 metadata stores
+    # endianness as part of the dtype rather than a filter (and the
+    # ``bytes`` codec would otherwise be interpreted as a compressor).
+    #
+    # v3 codec objects originate from the zarr registry and may be the
+    # zarr-native wrappers or the underlying numcodecs instances.  In the
+    # latter case ``get_codec_config`` returns a dict with an ``id`` key, and
+    # the fallback logic in ``zarr_codec_config_to_v2`` will produce a
+    # dictionary suitable for v2.  However, if something goes wrong and the
+    # returned configuration lacks an ``id`` the downstream zarr parser will
+    # raise ``UnknownCodecError('None')`` during kerchunk conversions.  To
+    # avoid that we silently drop any codec we cannot convert and emit a
+    # warning so that users can inspect the original metadata if necessary.
+    v2_codecs: list[dict] = []
+    for codec in v3_metadata.codecs:
+        if isinstance(codec, ArrayBytesCodec):
+            continue
+        cfg = zarr_codec_config_to_v2(get_codec_config(codec))
+        if not cfg.get("id"):
+            import warnings
+
+            warnings.warn(
+                "Encountered codec configuration without an 'id' when converting "
+                "v3 metadata to v2; skipping this codec.",
+                UserWarning,
+            )
+            continue
+        v2_codecs.append(cfg)
     # TODO: Remove convert_v3_to_v2_metadata and always encode V3 metadata.
     # This logic is based on the (default) Bytes codec's endian property,
     # but other codec pipelines could store endianness elsewhere.
