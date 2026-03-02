@@ -218,7 +218,35 @@ def manifest_from_inline_reference(
     kerchunk_chunk_dict: dict[ChunkKey, str | tuple[str] | tuple[str, int, int]],
     cache: ObjectStore,
 ) -> ChunkManifest:
-    data = base64.b64decode(kerchunk_chunk_dict["0"].lstrip("base64:"))
+    # Kerchunk stores small chunk data inline using a "base64:" prefix.
+    # Historically we used str.lstrip("base64:"), but that treats its
+    # argument as a *set* of characters and silently removes any of the
+    # characters 'b', 'a', 's', 'e', '6', '4', ':' from the start of the
+    # encoded payload.  Under Python 3.12 the stricter decoder then raised
+    # ``Incorrect padding`` when the remaining string length wasn't a
+    # multiple of four.  Use removeprefix and normalise padding instead.
+    encoded = kerchunk_chunk_dict["0"]
+    if isinstance(encoded, str) and encoded.startswith("base64:"):
+        # strip the literal prefix exactly once
+        payload = encoded.removeprefix("base64:")
+    else:
+        # Nothing to decode; let base64 handle the type error below
+        payload = encoded  # type: ignore[assignment]
+
+    # remove any whitespace/newlines that may have crept in
+    payload = payload.strip()
+    # ensure length is a multiple of 4 by adding '=' padding if needed
+    pad = (-len(payload)) % 4
+    if pad:
+        payload += "=" * pad
+
+    try:
+        data = base64.b64decode(payload)
+    except binascii.Error as exc:  # strict padding errors arrive here
+        raise ValueError(
+            f"failed to decode inline base64 chunk: {exc!r}"
+        ) from exc
+
     key = str(uuid.uuid4())
     cache.put(key, data)
     return ChunkManifest(

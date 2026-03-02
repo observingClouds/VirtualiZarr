@@ -306,6 +306,53 @@ def test_load_manifest(tmp_path, netcdf4_file, netcdf4_inlined_ref, local_regist
         xrt.assert_identical(ds, manifest_ds)
 
 
+def test_manifest_from_inline_reference_handles_prefix_and_padding():
+    """Confirm the decoder tolerates "base64:" prefix and missing padding."""
+    from virtualizarr.parsers.kerchunk.translator import manifest_from_inline_reference
+    from obstore.store import MemoryStore
+
+    raw = b"hello"
+    encoded = base64.b64encode(raw).decode()
+
+    cache = MemoryStore()
+    # try with exactly-padded and unpadded strings
+    for payload in (encoded, encoded.rstrip("=")):
+        manifest = manifest_from_inline_reference({"0": f"base64:{payload}"}, cache)
+        assert manifest.entries["0"]["length"] == len(raw)
+        # retrieve data from cache to ensure it was stored correctly
+        key = manifest.entries["0"]["path"].split("/")[-1]
+        resp = cache.get(key)
+        assert resp.bytes().to_bytes() == raw
+
+
+@requires_kerchunk
+
+def test_load_manifest_with_unpadded_inline(tmp_path, netcdf4_file, local_registry):
+    """Regression test for user-reported "Incorrect padding" crash."""
+    parser = KerchunkJSONParser()
+    refs = SingleHdf5ToZarr(netcdf4_file, inline_threshold=1000).translate()
+    # remove padding from first inline chunk we find
+    for k, v in refs["refs"].items():
+        if isinstance(v, str) and v.startswith("base64:"):
+            refs["refs"][k] = v.rstrip("=")
+            break
+    bad_path = tmp_path / "unpadded.json"
+    with open(bad_path, "w") as f:
+        ujson.dump(refs, f)
+    manifest_store = parser(url=f"file://{bad_path}", registry=local_registry)
+
+    with (
+        xr.open_dataset(netcdf4_file) as ds,
+        xr.open_dataset(
+            manifest_store,
+            engine="zarr",
+            consolidated=False,
+            zarr_format=3,
+        ) as manifest_ds,
+    ):
+        xrt.assert_identical(ds, manifest_ds)
+
+
 def test_parse_dict_via_memorystore(array_v3_metadata):
     # generate some example kerchunk references
     refs: dict = gen_ds_refs()

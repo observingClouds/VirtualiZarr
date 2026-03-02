@@ -222,6 +222,7 @@ Minor release to ensure compatibility with incoming changes to Icechunk.
   ([#543](https://github.com/zarr-developers/VirtualiZarr/pull/543)) By [Tom Nicholas](https://github.com/TomNicholas).
 - Ensure that the `KerchunkJSONParser` can be used to parse in-memory kerchunk dictionaries using `obstore.store.MemoryStore`.
   ([#631](https://github.com/zarr-developers/VirtualiZarr/pull/631)) By [Tom Nicholas](https://github.com/TomNicholas).
+- Fix error reading kerchunk inline references when the encoded data began with one of the characters in ``"base64:"`` or lacked ``=`` padding.  Previously this raised ``Incorrect padding`` under Python 3.12.  ([#???](placeholder))
 - Move the `virtualizarr.translators.kerchunk` module to `virtualizarr.parsers.kerchunk.translator`, to better indicate that it is private. Also refactor the two kerchunk readers into one module.
   ([#633](https://github.com/zarr-developers/VirtualiZarr/pull/633)) By [Tom Nicholas](https://github.com/TomNicholas).
 
